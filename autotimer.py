@@ -1,110 +1,87 @@
-from __future__ import print_function
 import time
-from os import system
-from activity import *
-import json
 import datetime
 import sys
-if sys.platform in ['Windows', 'win32', 'cygwin']:
-    import win32gui
-    import uiautomation as auto
-elif sys.platform in ['Mac', 'darwin', 'os2', 'os2emx']:
-    from AppKit import NSWorkspace
-    from Foundation import *
-elif sys.platform in ['linux', 'linux2']:
-        import linux as l
+from activity import DBManager
 
-active_window_name = ""
-activity_name = ""
-start_time = datetime.datetime.now()
-activeList = AcitivyList([])
-first_time = True
+IDLE_LIMIT = 60  # seconds
 
 
-def url_to_name(url):
-    string_list = url.split('/')
-    return string_list[2]
+# ---------------- IDLE DETECTION ----------------
+def get_idle_time():
+    if sys.platform.startswith("linux"):
+        try:
+            import subprocess
+            out = subprocess.check_output(["xprintidle"])
+            return int(out) / 1000
+        except Exception:
+            return 0
+
+    elif sys.platform.startswith("win"):
+        try:
+            import ctypes
+
+            class LASTINPUTINFO(ctypes.Structure):
+                _fields_ = [("cbSize", ctypes.c_uint),
+                            ("dwTime", ctypes.c_uint)]
+
+            lii = LASTINPUTINFO()
+            lii.cbSize = ctypes.sizeof(lii)
+            ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lii))
+            millis = ctypes.windll.kernel32.GetTickCount() - lii.dwTime
+            return millis / 1000.0
+        except Exception:
+            return 0
+
+    return 0
 
 
+# ---------------- WINDOW DETECTION ----------------
 def get_active_window():
-    _active_window_name = None
-    if sys.platform in ['Windows', 'win32', 'cygwin']:
-        window = win32gui.GetForegroundWindow()
-        _active_window_name = win32gui.GetWindowText(window)
-    elif sys.platform in ['Mac', 'darwin', 'os2', 'os2emx']:
-        _active_window_name = (NSWorkspace.sharedWorkspace()
-                               .activeApplication()['NSApplicationName'])
-    else:
-        print("sys.platform={platform} is not supported."
-              .format(platform=sys.platform))
-        print(sys.version)
-    return _active_window_name
+    if sys.platform.startswith("linux"):
+        from linux import get_active_window
+        return get_active_window()
+
+    elif sys.platform.startswith("win"):
+        import win32gui
+        return win32gui.GetWindowText(win32gui.GetForegroundWindow())
+
+    elif sys.platform.startswith("darwin"):
+        from AppKit import NSWorkspace
+        return NSWorkspace.sharedWorkspace().activeApplication()['NSApplicationName']
+
+    return "Unknown"
 
 
-def get_chrome_url():
-    if sys.platform in ['Windows', 'win32', 'cygwin']:
-        window = win32gui.GetForegroundWindow()
-        chromeControl = auto.ControlFromHandle(window)
-        edit = chromeControl.EditControl()
-        return 'https://' + edit.GetValuePattern().Value
-    elif sys.platform in ['Mac', 'darwin', 'os2', 'os2emx']:
-        textOfMyScript = """tell app "google chrome" to get the url of the active tab of window 1"""
-        s = NSAppleScript.initWithSource_(
-            NSAppleScript.alloc(), textOfMyScript)
-        results, err = s.executeAndReturnError_(None)
-        return results.stringValue()
-    else:
-        print("sys.platform={platform} is not supported."
-              .format(platform=sys.platform))
-        print(sys.version)
-    return _active_window_name
+# ---------------- MAIN LOOP ----------------
+def run():
+    db = DBManager()
 
-try:
-    activeList.initialize_me()
-except Exception:
-    print('No json')
+    current_activity = get_active_window()
+    start_time = datetime.datetime.now()
 
+    print("AutoTimer started...")
+    print("Current:", current_activity)
 
-try:
     while True:
-        previous_site = ""
-        if sys.platform not in ['linux', 'linux2']:
-            new_window_name = get_active_window()
-            if 'Google Chrome' in new_window_name:
-                new_window_name = url_to_name(get_chrome_url())
-        if sys.platform in ['linux', 'linux2']:
-            new_window_name = l.get_active_window_x()
-            if 'Google Chrome' in new_window_name:
-                new_window_name = l.get_chrome_url_x()
-
-        
-        if active_window_name != new_window_name:
-            print(active_window_name)
-            activity_name = active_window_name
-
-            if not first_time:
-                end_time = datetime.datetime.now()
-                time_entry = TimeEntry(start_time, end_time, 0, 0, 0, 0)
-                time_entry._get_specific_times()
-
-                exists = False
-                for activity in activeList.activities:
-                    if activity.name == activity_name:
-                        exists = True
-                        activity.time_entries.append(time_entry)
-
-                if not exists:
-                    activity = Activity(activity_name, [time_entry])
-                    activeList.activities.append(activity)
-                with open('activities.json', 'w') as json_file:
-                    json.dump(activeList.serialize(), json_file,
-                              indent=4, sort_keys=True)
-                    start_time = datetime.datetime.now()
-            first_time = False
-            active_window_name = new_window_name
-
         time.sleep(1)
-    
-except KeyboardInterrupt:
-    with open('activities.json', 'w') as json_file:
-        json.dump(activeList.serialize(), json_file, indent=4, sort_keys=True)
+
+        idle_seconds = get_idle_time()
+
+        if idle_seconds > IDLE_LIMIT:
+            new_activity = "Idle"
+        else:
+            new_activity = get_active_window()
+
+        if new_activity != current_activity:
+            end_time = datetime.datetime.now()
+
+            db.add_time_entry(current_activity, start_time, end_time)
+
+            print("Switch:", current_activity, "→", new_activity)
+
+            current_activity = new_activity
+            start_time = datetime.datetime.now()
+
+
+if __name__ == "__main__":
+    run()
